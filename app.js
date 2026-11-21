@@ -60,7 +60,8 @@ async function armMidi() {
     return;
   }
   try {
-    await initAudio();
+    if (mode === 'playground') await initAudio();
+    else $('audioStatus').textContent = 'MIDI timing ready';
     if (mode === 'trainer') resetHits();
     midiClock.reset();
     midiClock.start();
@@ -102,8 +103,8 @@ function handleMidiSync(event) {
     updateSyncStatus(`Following MIDI clock - ${midiClock.bpm ? Math.round(midiClock.bpm) : '...'} BPM`);
     if (pulse.number % 6 !== 0) return;
     const step = pulse.number / 6;
-    const time = audio.currentTime + Math.max(0, (event.timeStamp - performance.now()) / 1000);
     if (mode === 'playground') {
+      const time = audio.currentTime + Math.max(0, (event.timeStamp - performance.now()) / 1000);
       const position = step % (barCount * 16);
       pattern[Math.floor(position / 16)].forEach((row, index) => {
         if (row[position % 16]) drum(index, time);
