@@ -18,6 +18,7 @@ let appTempo = 90;
 let preferredView = 'trainer';
 let calibration = null;
 let preferredMidiInput = '';
+let activeMidiInput = '';
 try { preferredMidiInput = localStorage.getItem('pocket-midi-input') || ''; } catch {}
 const midiClock = new MidiClock();
 let syncArmed = false;
@@ -25,7 +26,13 @@ let syncWatchdog;
 let frameId;
 const followsMidi = () => $('clockSource').value === 'midi';
 
+function autoFollowMidi() {
+  if (mode === 'trainer' && followsMidi() && !document.hidden &&
+      $('devices').value && !syncArmed) armMidi();
+}
+
 function updateStartButton() {
+  $('start').hidden = mode === 'trainer' && followsMidi();
   $('start').textContent = syncArmed ? 'Disarm MIDI sync' :
     running ? 'Stop' : followsMidi() ? 'Arm MIDI sync' :
     mode === 'trainer' ? 'Start practice' : 'Play groove';
@@ -68,11 +75,12 @@ async function armMidi() {
     sessionBpm = bpm;
     syncArmed = true;
     running = false;
-    updateSyncStatus('Armed - waiting for MIDI clock. Start on the V51 to align bar 1.');
+    updateSyncStatus('Waiting for MIDI clock. MIDI Start aligns bar 1.');
     updateStartButton();
     syncWatchdog = setInterval(() => {
       if (running && !midiClock.isFresh(performance.now())) {
-        pauseMidi('Clock lost - stopped. Re-arm or send MIDI Start to resume.');
+        pauseMidi('Clock lost - waiting for MIDI clock to return.');
+        if (mode === 'trainer') midiClock.start();
       }
     }, 100);
   } catch (error) {
@@ -131,10 +139,11 @@ $('clockSource').onchange = () => {
   stop();
   midiClock.reset();
   for (const id of ['tempo', 'tempoSlider', 'tap', 'click']) $(id).disabled = followsMidi();
-  updateSyncStatus(followsMidi() ? 'Connect MIDI, then arm sync to follow the V51.' : 'App tempo is in control.');
+  updateSyncStatus(followsMidi() ? 'Connect MIDI to follow the V51 clock.' : 'App tempo is in control.');
   if (!followsMidi()) setTempo(appTempo);
   save();
   updateStartButton();
+  autoFollowMidi();
 };
 
 function save() {
@@ -194,7 +203,7 @@ function stop() {
   clearInterval(syncWatchdog);
   midiClock.stop();
   stopAudio();
-  if (followsMidi()) updateSyncStatus('Sync disarmed - tap Arm MIDI sync to follow.');
+  if (followsMidi()) updateSyncStatus('MIDI tracking paused.');
   updateStartButton();
   document.querySelectorAll('.playing').forEach(element => element.classList.remove('playing'));
 }
@@ -206,11 +215,12 @@ $('start').onclick = () => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && (running || syncArmed)) {
     stop();
-    updateSyncStatus('Stopped while hidden - tap to start again.');
+    updateSyncStatus('Tracking paused while the page is hidden.');
     $('audioStatus').textContent = 'Stopped while the page was hidden';
   }
+  if (!document.hidden) autoFollowMidi();
 });
-function route(){stop();mode=location.hash==='#playground'||(!location.hash&&preferredView==='playground')?'playground':'trainer';preferredView=mode;save();$('trainer').hidden=mode!=='trainer';$('playground').hidden=mode!=='playground';$('title').textContent=mode==='trainer'?'Get into time.':'Make it groove.';$('subtitle').textContent=mode==='trainer'?'Connect your kit, follow the click, and see where every hit lands.':'A blank bar, a few hits, and a groove that’s yours.';document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+mode));$('start').textContent=mode==='trainer'?'Start practice':'Play groove';updateStartButton();draw();}
+function route(){stop();mode=location.hash==='#playground'||(!location.hash&&preferredView==='playground')?'playground':'trainer';preferredView=mode;save();$('trainer').hidden=mode!=='trainer';$('playground').hidden=mode!=='playground';$('title').textContent=mode==='trainer'?'Get into time.':'Make it groove.';$('subtitle').textContent=mode==='trainer'?'Connect your kit, follow the click, and see where every hit lands.':'A blank bar, a few hits, and a groove that’s yours.';document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+mode));$('start').textContent=mode==='trainer'?'Start practice':'Play groove';updateStartButton();draw();autoFollowMidi();}
 window.addEventListener('hashchange',route);
 function resetHits(){hits=[];updateStats();draw();$('hitLog').replaceChildren();} $('reset').onclick=resetHits;
 async function connect(){if(!navigator.requestMIDIAccess){$('midiStatus').textContent='Web MIDI is unavailable here. Open this HTTPS page in a supporting browser such as Chrome on your Mac.';return;}try{midi=await navigator.requestMIDIAccess({sysex:false});refreshInputs();midi.onstatechange=refreshInputs;}catch(e){$('midiStatus').textContent=`MIDI access failed · ${e.message}. Click Connect MIDI to grant access or retry.`;}}
@@ -225,20 +235,24 @@ function refreshInputs() {
 }
 
 function selectInput() {
-  stop();
-  midiClock.reset();
   const selected = $('devices').value;
+  if (selected !== activeMidiInput) {
+    stop();
+    midiClock.reset();
+    activeMidiInput = selected;
+  }
   if (selected) {
     preferredMidiInput = selected;
     try { localStorage.setItem('pocket-midi-input', selected); } catch {}
   }
-  if (followsMidi()) updateSyncStatus('MIDI input changed - arm sync to follow.');
+  if (followsMidi() && !syncArmed) updateSyncStatus('Waiting for MIDI input and clock.');
   for (const input of midi.inputs.values()) {
     input.onmidimessage = input.id === selected ? onMidi : null;
   }
   $('midiStatus').textContent = selected ? 'Connected - play your kit' :
     preferredMidiInput ? 'Last MIDI input is unavailable. Reconnect it or choose another input.' :
     'No input selected - connect your kit and choose an input';
+  autoFollowMidi();
 }
 $('connect').onclick=connect;$('devices').onchange=selectInput;
 function onMidi(event){handleMidiSync(event);const [status,note,velocity]=event.data;if((status&240)!==144||!velocity)return;const voice=voices.find(v=>v.notes.includes(note));const name=voice?.name||`Note ${note}`;$('noteStatus').textContent=`${name} · MIDI ${note} · velocity ${velocity}`;if(!running||mode!=='trainer')return;if(calibration){recordCalibration(event.timeStamp,note);return;}const timestamp = event.timeStamp - Math.max(-500,Math.min(500,Number($('offset').value)||0));
@@ -283,7 +297,7 @@ window.addEventListener('resize',draw);
 $('tempo').value = bpm;
 $('tempoSlider').value = bpm;
 for (const id of ['tempo', 'tempoSlider', 'tap', 'click']) $(id).disabled = followsMidi();
-if (followsMidi()) updateSyncStatus('Connect MIDI, then arm sync to follow the V51.');
+if (followsMidi()) updateSyncStatus('Connect MIDI to follow the V51 clock.');
 renderEditor();
 route();
 $('click').onchange = save;
