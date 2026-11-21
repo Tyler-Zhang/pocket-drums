@@ -14,6 +14,125 @@ let pattern = Array.from({length:4},()=>voices.map(()=>Array(16).fill(false)));
 let barCount=1, editBar=0, bpm=90, mode='trainer', running=false, hits=[], midi;
 let audio, noiseBuffer, timer, nextStep, nextTime, startAudio, startPerformance, sessionBpm, scheduled=[];
 let taps=[];
+const midiClock = new MidiClock();
+let syncArmed = false;
+let syncWatchdog;
+let frameId;
+const followsMidi = () => $('clockSource').value === 'midi';
+
+function updateStartButton() {
+  $('start').textContent = syncArmed ? 'Disarm MIDI sync' :
+    running ? 'Stop' : followsMidi() ? 'Arm MIDI sync' :
+    mode === 'trainer' ? 'Start practice' : 'Play groove';
+}
+
+function updateSyncStatus(message) {
+  $('syncStatus').textContent = message;
+}
+
+function stopAudio() {
+  cancelAnimationFrame(frameId);
+  clearInterval(timer);
+  for (const node of scheduled) {
+    try { node.stop(); } catch {}
+  }
+  scheduled = [];
+}
+
+function pauseMidi(message) {
+  running = false;
+  midiClock.stop();
+  stopAudio();
+  document.querySelectorAll('.playing').forEach(element => element.classList.remove('playing'));
+  updateSyncStatus(message);
+  $('position').textContent = message;
+  updateStartButton();
+}
+
+async function armMidi() {
+  if (!$('devices').value) {
+    updateSyncStatus('Connect MIDI and choose the V51 input first.');
+    return;
+  }
+  try {
+    await initAudio();
+    if (mode === 'trainer') resetHits();
+    midiClock.reset();
+    midiClock.start();
+    sessionBpm = bpm;
+    syncArmed = true;
+    running = false;
+    updateSyncStatus('Armed - waiting for MIDI clock. Start on the V51 to align bar 1.');
+    updateStartButton();
+    syncWatchdog = setInterval(() => {
+      if (running && !midiClock.isFresh(performance.now())) {
+        pauseMidi('Clock lost - stopped. Re-arm or send MIDI Start to resume.');
+      }
+    }, 100);
+  } catch (error) {
+    updateSyncStatus(`Audio unavailable - ${error.message}`);
+  }
+}
+
+function handleMidiSync(event) {
+  const [status, low, high] = event.data;
+  if (!followsMidi()) return;
+  if (status === 0xf8) {
+    const pulse = midiClock.tick(event.timeStamp);
+    if (midiClock.bpm) {
+      bpm = midiClock.bpm;
+      sessionBpm = bpm;
+      $('tempo').value = bpm.toFixed(1);
+      $('tempoSlider').value = Math.max(30, Math.min(260, bpm));
+    }
+    if (!syncArmed) {
+      updateSyncStatus('MIDI clock detected - tap Arm MIDI sync to follow.');
+      return;
+    }
+    if (!pulse) return;
+    if (!running) {
+      running = true;
+      frameId = requestAnimationFrame(frame);
+    }
+    updateSyncStatus(`Following MIDI clock - ${midiClock.bpm?.toFixed(1) || '...'} BPM`);
+    if (pulse.number % 6 !== 0) return;
+    const step = pulse.number / 6;
+    const time = audio.currentTime + Math.max(0, (event.timeStamp - performance.now()) / 1000);
+    if ($('click').checked && step % 4 === 0) {
+      tone(time, step % 16 === 0 ? 1500 : 950, .035, .15);
+    }
+    if (mode === 'playground') {
+      const position = step % (barCount * 16);
+      pattern[Math.floor(position / 16)].forEach((row, index) => {
+        if (row[position % 16]) drum(index, time);
+      });
+    }
+    return;
+  }
+  if (!syncArmed) return;
+  if (status === 0xfa) {
+    pauseMidi('MIDI Start - waiting for clock');
+    if (mode === 'trainer') resetHits();
+    midiClock.start();
+  } else if (status === 0xfb) {
+    midiClock.resume();
+    updateSyncStatus('MIDI Continue - waiting for clock');
+  } else if (status === 0xfc) {
+    pauseMidi('MIDI stopped - waiting for Start or Continue');
+  } else if (status === 0xf2 && event.data.length >= 3) {
+    midiClock.seek(low | (high << 7));
+  }
+}
+
+$('clockSource').onchange = () => {
+  stop();
+  midiClock.reset();
+  for (const id of ['tempo', 'tempoSlider', 'tap']) $(id).disabled = followsMidi();
+  updateSyncStatus(followsMidi() ? 'Connect MIDI, then arm sync to follow the V51.' : 'App tempo is in control.');
+  if (!followsMidi()) setTempo(bpm);
+  updateStartButton();
+};
+
 function save(){try{localStorage.setItem('pocket-v1',JSON.stringify({pattern,barCount,bpm}));$('saved').textContent='Saved on this device';}catch{$('saved').textContent='Storage unavailable';}}
 function preset(type){pattern=Array.from({length:4},()=>voices.map(()=>Array(16).fill(false)));if(type!=='empty')for(let b=0;b<4;b++){for(let s=0;s<16;s++){pattern[b][2][s]=s%(type==='funk'?1:2)===0;pattern[b][4][s]=s===4||s===12;pattern[b][7][s]=[0,8,...(type==='funk'?[7,10]:[])].includes(s);}}}
 preset('basic');
@@ -28,20 +147,71 @@ function drum(row,time){if(row===7)tone(time,150,.18,.65,42);else if(row===4){no
 function scheduler(){if(!running)return;while(nextTime<audio.currentTime+.12){if(nextTime<audio.currentTime-.04){stop();$('position').textContent='Audio paused. Start again to resume.';return;}const step=nextStep;if($('click').checked&&step%4===0)tone(nextTime,step%16===0?1500:950,.035,.15);if(mode==='playground'){const s=step%(barCount*16);pattern[Math.floor(s/16)].forEach((row,r)=>{if(row[s%16])drum(r,nextTime);});}nextTime+=60/sessionBpm/4;nextStep++;}}
 async function start(){try{await initAudio();if(mode==='trainer')resetHits();running=true;sessionBpm=bpm;startAudio=audio.currentTime+.15;startPerformance=performance.now()+(startAudio-audio.currentTime)*1000;nextTime=startAudio;nextStep=mode==='trainer'?-16:0; // negative steps provide the count-in
 if(mode==='trainer')startPerformance+=16*60000/sessionBpm/4;
-$('start').textContent='Stop';scheduler();timer=setInterval(scheduler,25);requestAnimationFrame(frame);}catch(e){stop();$('audioStatus').textContent=`Audio unavailable · ${e.message}`;}}
-function stop(){running=false;clearInterval(timer);for(const n of scheduled){try{n.stop();}catch{}}scheduled=[];$('start').textContent=mode==='trainer'?'Start practice':'Play groove';document.querySelectorAll('.playing').forEach(e=>e.classList.remove('playing'));}
-$('start').onclick=()=>running?stop():start();document.addEventListener('visibilitychange',()=>{if(document.hidden&&running){stop();$('audioStatus').textContent='Stopped while the page was hidden';}});
-function route(){stop();mode=location.hash==='#playground'?'playground':'trainer';$('trainer').hidden=mode!=='trainer';$('playground').hidden=mode!=='playground';$('title').textContent=mode==='trainer'?'Get into time.':'Make it groove.';$('subtitle').textContent=mode==='trainer'?'Connect your kit, follow the click, and see where every hit lands.':'A blank bar, a few hits, and a groove that’s yours.';document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+mode));$('start').textContent=mode==='trainer'?'Start practice':'Play groove';draw();}
+$('start').textContent='Stop';scheduler();timer=setInterval(scheduler,25);frameId = requestAnimationFrame(frame);}catch(e){stop();$('audioStatus').textContent=`Audio unavailable · ${e.message}`;}}
+function stop() {
+  running = false;
+  syncArmed = false;
+  clearInterval(syncWatchdog);
+  midiClock.stop();
+  stopAudio();
+  if (followsMidi()) updateSyncStatus('Sync disarmed - tap Arm MIDI sync to follow.');
+  updateStartButton();
+  document.querySelectorAll('.playing').forEach(element => element.classList.remove('playing'));
+}
+$('start').onclick = () => {
+  if (syncArmed || running) stop();
+  else if (followsMidi()) armMidi();
+  else start();
+};
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && (running || syncArmed)) {
+    stop();
+    updateSyncStatus('Stopped while hidden - tap to start again.');
+    $('audioStatus').textContent = 'Stopped while the page was hidden';
+  }
+});
+function route(){stop();mode=location.hash==='#playground'?'playground':'trainer';$('trainer').hidden=mode!=='trainer';$('playground').hidden=mode!=='playground';$('title').textContent=mode==='trainer'?'Get into time.':'Make it groove.';$('subtitle').textContent=mode==='trainer'?'Connect your kit, follow the click, and see where every hit lands.':'A blank bar, a few hits, and a groove that’s yours.';document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+mode));$('start').textContent=mode==='trainer'?'Start practice':'Play groove';updateStartButton();draw();}
 window.addEventListener('hashchange',route);
 function resetHits(){hits=[];updateStats();draw();$('hitLog').replaceChildren();} $('reset').onclick=resetHits;
 async function connect(){if(!navigator.requestMIDIAccess){$('midiStatus').textContent='Web MIDI is unavailable here. Open this HTTPS page in a supporting browser such as Chrome on your Mac.';return;}try{midi=await navigator.requestMIDIAccess({sysex:false});refreshInputs();midi.onstatechange=refreshInputs;}catch(e){$('midiStatus').textContent=`MIDI access failed · ${e.message}. Check browser permissions and try again.`;}}
 function refreshInputs(){const previous=$('devices').value;const inputs=[...midi.inputs.values()].filter(i=>i.state==='connected');$('devices').replaceChildren(new Option('Choose MIDI input',''),...inputs.map(i=>new Option(i.name||'MIDI input',i.id)));$('devices').value=inputs.some(i=>i.id===previous)?previous:(inputs[0]?.id||'');selectInput();}
-function selectInput(){for(const input of midi.inputs.values())input.onmidimessage=input.id===$('devices').value?onMidi:null;$('midiStatus').textContent=$('devices').value?'Connected · play your kit':'No input selected · connect your kit and choose an input';}
+function selectInput(){stop();midiClock.reset();if(followsMidi())updateSyncStatus('MIDI input changed - arm sync to follow.');for(const input of midi.inputs.values())input.onmidimessage=input.id===$('devices').value?onMidi:null;$('midiStatus').textContent=$('devices').value?'Connected · play your kit':'No input selected · connect your kit and choose an input';}
 $('connect').onclick=connect;$('devices').onchange=selectInput;
-function onMidi(event){const [status,note,velocity]=event.data;if((status&240)!==144||!velocity)return;const voice=voices.find(v=>v.notes.includes(note));const name=voice?.name||`Note ${note}`;$('noteStatus').textContent=`${name} · MIDI ${note} · velocity ${velocity}`;if(!running||mode!=='trainer')return;const time=event.timeStamp-startPerformance-Math.max(-500,Math.min(500,Number($('offset').value)||0));if(time<0)return;const stepDuration=60000/sessionBpm/4;const step=Math.round(time/stepDuration),error=time-step*stepDuration;hits.push({step,error,note,name,velocity});if(hits.length>10000)hits.shift();const tag=document.createElement('span');tag.textContent=`${name} ${error>0?'+':''}${Math.round(error)} ms`;$('hitLog').prepend(tag);while($('hitLog').children.length>8)$('hitLog').lastChild.remove();updateStats();draw();}
+function onMidi(event){handleMidiSync(event);const [status,note,velocity]=event.data;if((status&240)!==144||!velocity)return;const voice=voices.find(v=>v.notes.includes(note));const name=voice?.name||`Note ${note}`;$('noteStatus').textContent=`${name} · MIDI ${note} · velocity ${velocity}`;if(!running||mode!=='trainer')return;const timestamp = event.timeStamp - Math.max(-500,Math.min(500,Number($('offset').value)||0));
+let timing;
+if (followsMidi()) {
+  if (!midiClock.isFresh(event.timeStamp)) return;
+  timing = midiClock.timingAt(timestamp);
+} else {
+  const time = timestamp - startPerformance;
+  if (time < 0) return;
+  const stepDuration = 60000 / sessionBpm / 4;
+  const step = Math.round(time / stepDuration);
+  timing = { step, error: time - step * stepDuration };
+}
+if (!timing) return;
+const { step, error } = timing;hits.push({step,error,note,name,velocity});if(hits.length>10000)hits.shift();const tag=document.createElement('span');tag.textContent=`${name} ${error>0?'+':''}${Math.round(error)} ms`;$('hitLog').prepend(tag);while($('hitLog').children.length>8)$('hitLog').lastChild.remove();updateStats();draw();}
 function updateStats(){$('hitCount').textContent=hits.length;$('mean').textContent=hits.length?`${Math.round(hits.reduce((a,h)=>a+Math.abs(h.error),0)/hits.length)} ms`:'—';$('accuracy').textContent=hits.length?`${Math.round(100*hits.filter(h=>Math.abs(h.error)<=25).length/hits.length)}%`:'—';const last=hits.at(-1);$('last').textContent=last?`${last.error>0?'+':''}${Math.round(last.error)} ms`:'—';}
-function draw(){if(mode!=='trainer')return;const canvas=$('timing'),rect=canvas.getBoundingClientRect();if(!rect.width)return;const dpr=window.devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);const w=rect.width,h=rect.height,left=48,right=w-12,top=30,bottom=h-30,mid=(top+bottom)/2,range=60000/(running?sessionBpm:bpm)/8;const current=running?Math.max(0,(performance.now()-startPerformance)/(60000/sessionBpm/4)):hits.at(-1)?.step||0;const first=Math.max(0,Math.floor(current/16)*16-48);c.font='11px sans-serif';for(let s=0;s<=64;s++){const x=left+(right-left)*s/64;c.strokeStyle=s%16===0?'#64745c':s%4===0?'#3c4c3d':'#28372d';c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();if(s%16===0&&s<64){c.fillStyle='#a4b3a5';c.fillText(`Bar ${Math.floor((first+s)/16)+1}`,x+4,16);}}const tolerance=25/range*(bottom-top)/2;c.fillStyle='#c6ec8710';c.fillRect(left,mid-tolerance,right-left,tolerance*2);for(const value of [-range,0,range]){const y=mid+value/range*(bottom-top)/2;c.strokeStyle=value===0?'#c6ec87':'#344238';c.beginPath();c.moveTo(left,y);c.lineTo(right,y);c.stroke();c.fillStyle='#a4b3a5';c.fillText(value===0?'0':`${Math.round(value)}`,2,y+4);}for(const hit of hits){if(hit.step<first||hit.step>=first+64)continue;const x=left+(hit.step-first+hit.error/(range*2))/64*(right-left),y=mid+hit.error/range*(bottom-top)/2;c.fillStyle=Math.abs(hit.error)<=25?'#c6ec87':'#efab72';c.beginPath();c.arc(x,y,4,0,Math.PI*2);c.fill();}if(running&&current>=first){const x=left+(current-first)/64*(right-left);c.strokeStyle='#eef1e6';c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();}}
-function frame(){if(!running)return;const elapsed=(audio.currentTime-startAudio)/(60/sessionBpm/4);if(mode==='trainer'){$('position').textContent=elapsed<16?`Count in · ${Math.max(1,4-Math.floor(Math.max(0,elapsed)/4))}`:`Bar ${Math.floor((elapsed-16)/16)+1} · beat ${Math.floor((elapsed-16)%16/4)+1}`;draw();}else{const step=Math.max(0,Math.floor(elapsed))%(barCount*16);document.querySelectorAll('.step').forEach(e=>e.classList.toggle('playing',Number(e.dataset.step)===step%16&&editBar===Math.floor(step/16)));}requestAnimationFrame(frame);}
+function draw(){if(mode!=='trainer')return;const canvas=$('timing'),rect=canvas.getBoundingClientRect();if(!rect.width)return;const dpr=window.devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);const w=rect.width,h=rect.height,left=48,right=w-12,top=30,bottom=h-30,mid=(top+bottom)/2,range=60000/(running?sessionBpm:bpm)/8;const current=running?(followsMidi()?Math.max(0,midiClock.positionAt(performance.now())||0):Math.max(0,(performance.now()-startPerformance)/(60000/sessionBpm/4))):hits.at(-1)?.step||0;const first=Math.max(0,Math.floor(current/16)*16-48);c.font='11px sans-serif';for(let s=0;s<=64;s++){const x=left+(right-left)*s/64;c.strokeStyle=s%16===0?'#64745c':s%4===0?'#3c4c3d':'#28372d';c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();if(s%16===0&&s<64){c.fillStyle='#a4b3a5';c.fillText(`Bar ${Math.floor((first+s)/16)+1}`,x+4,16);}}const tolerance=25/range*(bottom-top)/2;c.fillStyle='#c6ec8710';c.fillRect(left,mid-tolerance,right-left,tolerance*2);for(const value of [-range,0,range]){const y=mid+value/range*(bottom-top)/2;c.strokeStyle=value===0?'#c6ec87':'#344238';c.beginPath();c.moveTo(left,y);c.lineTo(right,y);c.stroke();c.fillStyle='#a4b3a5';c.fillText(value===0?'0':`${Math.round(value)}`,2,y+4);}for(const hit of hits){if(hit.step<first||hit.step>=first+64)continue;const x=left+(hit.step-first+hit.error/(range*2))/64*(right-left),y=mid+hit.error/range*(bottom-top)/2;c.fillStyle=Math.abs(hit.error)<=25?'#c6ec87':'#efab72';c.beginPath();c.arc(x,y,4,0,Math.PI*2);c.fill();}if(running&&current>=first){const x=left+(current-first)/64*(right-left);c.strokeStyle='#eef1e6';c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();}}
+function frame() {
+  if (!running) return;
+  const elapsed = followsMidi() ? Math.max(0, midiClock.positionAt(performance.now()) || 0) :
+    (audio.currentTime - startAudio) / (60 / sessionBpm / 4);
+  if (mode === 'trainer') {
+    const position = followsMidi() ? elapsed : elapsed - 16;
+    $('position').textContent = position < 0 ?
+      `Count in - ${Math.max(1, 4 - Math.floor(Math.max(0, elapsed) / 4))}` :
+      `Bar ${Math.floor(position / 16) + 1} ? beat ${Math.floor(position % 16 / 4) + 1}`;
+    draw();
+  } else {
+    const step = Math.max(0, Math.floor(elapsed)) % (barCount * 16);
+    document.querySelectorAll('.step').forEach(element => {
+      element.classList.toggle('playing', Number(element.dataset.step) === step % 16 &&
+        editBar === Math.floor(step / 16));
+    });
+  }
+  frameId = requestAnimationFrame(frame);
+}
 function renderEditor(){$('bars').value=barCount;$('editBar').replaceChildren(...Array.from({length:barCount},(_,b)=>new Option(String(b+1),String(b))));$('editBar').value=editBar;const container=$('sequencer');container.replaceChildren();const counts=document.createElement('div');counts.className='stepRow counts';for(const text of ['KIT',...Array.from({length:16},(_,s)=>s%4===0?String(s/4+1):['','e','&','a'][s%4])]){const label=document.createElement('span');label.textContent=text;counts.append(label);}container.append(counts);voices.forEach((voice,r)=>{const row=document.createElement('div');row.className='stepRow';const name=document.createElement('span');name.textContent=voice.name;row.append(name);for(let s=0;s<16;s++){const button=document.createElement('button');button.className='step'+(s%4===0?' beat':'');button.dataset.step=s;button.setAttribute('aria-label',`${voice.name}, bar ${editBar+1}, beat ${Math.floor(s/4)+1} ${['','e','and','a'][s%4]}`);button.setAttribute('aria-pressed',pattern[editBar][r][s]);button.textContent=pattern[editBar][r][s]?'●':'';button.onclick=async()=>{pattern[editBar][r][s]=!pattern[editBar][r][s];button.setAttribute('aria-pressed',pattern[editBar][r][s]);button.textContent=pattern[editBar][r][s]?'●':'';save();renderScore();if(pattern[editBar][r][s]&&!running){try{await initAudio();drum(r,audio.currentTime);}catch(e){$('audioStatus').textContent=e.message;}}};row.append(button);}container.append(row);});renderScore();}
 function renderScore(){const ns='http://www.w3.org/2000/svg';$('notation').replaceChildren();for(let b=0;b<barCount;b++){const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 900 160');svg.setAttribute('role','img');svg.setAttribute('aria-label',`Bar ${b+1} drum score`);function el(type,attrs,text){const node=document.createElementNS(ns,type);for(const [key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text)node.textContent=text;svg.append(node);return node;}el('text',{x:12,y:20,'font-size':12,fill:'#52614d'},`Bar ${b+1} · 4/4`);for(let y=50;y<=90;y+=10)el('line',{x1:55,x2:880,y1:y,y2:y,stroke:'#7f8c76','stroke-width':.7});voices.forEach(v=>el('text',{x:25,y:v.y+4,'font-size':9,fill:'#53614d'},v.short));for(let s=0;s<16;s++){const x=75+s*50;el('text',{x:x-3,y:148,'font-size':11,fill:'#53614d'},s%4===0?String(s/4+1):['','e','&','a'][s%4]);const active=pattern[b].map((row,r)=>row[s]?r:-1).filter(r=>r>=0);if(!active.length){el('text',{x:x-3,y:76,'font-size':17,fill:'#7f8c76'},'𝄿');continue;}const minY=Math.min(...active.map(r=>voices[r].y));for(const r of active){const v=voices[r];if(v.cymbal){el('path',{d:`M${x-4} ${v.y-4}l8 8m0-8l-8 8`,stroke:'#15251b','stroke-width':1.8});}else el('ellipse',{cx:x,cy:v.y,rx:5,ry:3.5,fill:'#15251b',transform:`rotate(-20 ${x} ${v.y})`});}el('line',{x1:x+4,x2:x+4,y1:Math.max(...active.map(r=>voices[r].y)),y2:minY-23,stroke:'#15251b','stroke-width':1.5});for(let flag=0;flag<2;flag++)el('path',{d:`M${x+4} ${minY-23+flag*6}q12 4 8 13`,fill:'none',stroke:'#15251b','stroke-width':1.7});}for(const x of [55,880])el('line',{x1:x,x2:x,y1:50,y2:100,stroke:'#15251b'});$('notation').append(svg);}}
 $('bars').onchange=e=>{stop();barCount=Number(e.target.value);editBar=Math.min(editBar,barCount-1);save();renderEditor();};$('editBar').onchange=e=>{editBar=Number(e.target.value);renderEditor();};$('clearBar').onclick=()=>{pattern[editBar]=voices.map(()=>Array(16).fill(false));save();renderEditor();};$('load').onclick=()=>{stop();preset($('preset').value);save();renderEditor();};
