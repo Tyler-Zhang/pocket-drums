@@ -22,6 +22,9 @@ let activeMidiInput = '';
 try { preferredMidiInput = localStorage.getItem('pocket-midi-input') || ''; } catch {}
 const midiClock = new MidiClock();
 let syncArmed = false;
+let beatReference = false;
+let awaitingDownbeat = false;
+let transportStopped = false;
 let syncWatchdog;
 let frameId;
 const followsMidi = () => $('clockSource').value === 'midi';
@@ -32,6 +35,8 @@ function autoFollowMidi() {
 }
 
 function updateStartButton() {
+  $('alignDownbeat').hidden = mode !== 'trainer' || !followsMidi();
+  $('alignDownbeat').disabled = !syncArmed;
   $('start').hidden = mode === 'trainer' && followsMidi();
   $('start').textContent = syncArmed ? 'Disarm MIDI sync' :
     running ? 'Stop' : followsMidi() ? 'Arm MIDI sync' :
@@ -80,7 +85,10 @@ async function armMidi() {
     syncWatchdog = setInterval(() => {
       if (running && !midiClock.isFresh(performance.now())) {
         pauseMidi('Clock lost - waiting for MIDI clock to return.');
-        if (mode === 'trainer') midiClock.start();
+        if (mode === 'trainer') {
+          beatReference = false;
+          midiClock.start();
+        }
       }
     }, 100);
   } catch (error) {
@@ -108,7 +116,11 @@ function handleMidiSync(event) {
       running = true;
       frameId = requestAnimationFrame(frame);
     }
-    updateSyncStatus(`Following MIDI clock - ${midiClock.bpm ? Math.round(midiClock.bpm) : '...'} BPM`);
+    const tempo = midiClock.bpm ? Math.round(midiClock.bpm) : '...';
+    const alignment = mode === 'trainer' && !beatReference
+      ? awaitingDownbeat ? ' - strike a pad on beat 1' : ' - waiting for beat 1'
+      : '';
+    updateSyncStatus(`Following MIDI clock - ${tempo} BPM${alignment}`);
     if (pulse.number % 6 !== 0) return;
     const step = pulse.number / 6;
     if (mode === 'playground') {
@@ -124,13 +136,20 @@ function handleMidiSync(event) {
   if (status === 0xfa) {
     pauseMidi('MIDI Start - waiting for clock');
     if (mode === 'trainer') resetHits();
+    beatReference = true;
+    awaitingDownbeat = false;
+    transportStopped = false;
     midiClock.start();
   } else if (status === 0xfb) {
+    transportStopped = false;
     midiClock.resume();
     updateSyncStatus('MIDI Continue - waiting for clock');
   } else if (status === 0xfc) {
+    transportStopped = true;
     pauseMidi('MIDI stopped - waiting for Start or Continue');
   } else if (status === 0xf2 && event.data.length >= 3) {
+    beatReference = true;
+    awaitingDownbeat = false;
     midiClock.seek(low | (high << 7));
   }
 }
@@ -200,6 +219,9 @@ function stop() {
   }
   running = false;
   syncArmed = false;
+  beatReference = false;
+  awaitingDownbeat = false;
+  transportStopped = false;
   clearInterval(syncWatchdog);
   midiClock.stop();
   stopAudio();
@@ -259,6 +281,13 @@ function onMidi(event){handleMidiSync(event);const [status,note,velocity]=event.
 let timing;
 if (followsMidi()) {
   if (!midiClock.isFresh(event.timeStamp)) return;
+  if (awaitingDownbeat && midiClock.alignDownbeat(timestamp)) {
+    beatReference = true;
+    awaitingDownbeat = false;
+    resetHits();
+    return;
+  }
+  if (!beatReference || awaitingDownbeat) return;
   timing = midiClock.timingAt(timestamp);
 } else {
   const time = timestamp - startPerformance;
@@ -277,7 +306,8 @@ function frame() {
     (audio.currentTime - startAudio) / (60 / sessionBpm / 4);
   if (mode === 'trainer') {
     const position = followsMidi() ? elapsed : elapsed - 16;
-    $('position').textContent = position < 0 ?
+    $('position').textContent = followsMidi() && (!beatReference || awaitingDownbeat)
+      ? 'Waiting for beat 1' : position < 0 ?
       `Count in - ${Math.max(1, 4 - Math.floor(Math.max(0, elapsed) / 4))}` :
       `Bar ${Math.floor(position / 16) + 1} ? beat ${Math.floor(position % 16 / 4) + 1}`;
     draw();
@@ -357,3 +387,12 @@ function recordCalibration(timestamp, note) {
 }
 
 if (navigator.requestMIDIAccess) connect();
+
+$('alignDownbeat').onclick = () => {
+  if (transportStopped) {
+    midiClock.resume();
+    transportStopped = false;
+  }
+  awaitingDownbeat = true;
+  updateSyncStatus('Strike a pad on beat 1 of the V51 click.');
+};

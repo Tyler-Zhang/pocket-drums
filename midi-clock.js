@@ -79,6 +79,15 @@ class MidiClock {
     return (anchor.number + (timestamp - anchor.timestamp) / this.period) / 6;
   }
 
+  alignDownbeat(timestamp) {
+    const position = this.positionAt(timestamp);
+    if (position === null) return false;
+    const downbeatPulse = Math.round(position * 6);
+    this.nextPulse -= downbeatPulse;
+    for (const pulse of this.pulses) pulse.number -= downbeatPulse;
+    return true;
+  }
+
   timingAt(timestamp) {
     const position = this.positionAt(timestamp);
     if (position === null || position < 0) return null;
