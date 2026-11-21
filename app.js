@@ -103,9 +103,6 @@ function handleMidiSync(event) {
     if (pulse.number % 6 !== 0) return;
     const step = pulse.number / 6;
     const time = audio.currentTime + Math.max(0, (event.timeStamp - performance.now()) / 1000);
-    if ($('click').checked && step % 4 === 0) {
-      tone(time, step % 16 === 0 ? 1500 : 950, .035, .15);
-    }
     if (mode === 'playground') {
       const position = step % (barCount * 16);
       pattern[Math.floor(position / 16)].forEach((row, index) => {
@@ -132,7 +129,7 @@ function handleMidiSync(event) {
 $('clockSource').onchange = () => {
   stop();
   midiClock.reset();
-  for (const id of ['tempo', 'tempoSlider', 'tap']) $(id).disabled = followsMidi();
+  for (const id of ['tempo', 'tempoSlider', 'tap', 'click']) $(id).disabled = followsMidi();
   updateSyncStatus(followsMidi() ? 'Connect MIDI, then arm sync to follow the V51.' : 'App tempo is in control.');
   if (!followsMidi()) setTempo(appTempo);
   save();
@@ -284,7 +281,7 @@ $('bars').onchange=e=>{stop();barCount=Number(e.target.value);editBar=Math.min(e
 window.addEventListener('resize',draw);
 $('tempo').value = bpm;
 $('tempoSlider').value = bpm;
-for (const id of ['tempo', 'tempoSlider', 'tap']) $(id).disabled = followsMidi();
+for (const id of ['tempo', 'tempoSlider', 'tap', 'click']) $(id).disabled = followsMidi();
 if (followsMidi()) updateSyncStatus('Connect MIDI, then arm sync to follow the V51.');
 renderEditor();
 route();
