@@ -87,7 +87,7 @@ function handleMidiSync(event) {
     if (midiClock.bpm) {
       bpm = midiClock.bpm;
       sessionBpm = bpm;
-      $('tempo').value = midiClock.bpm.toFixed(1);
+      $('tempo').value = Math.round(midiClock.bpm);
       $('tempoSlider').value = Math.max(30, Math.min(260, bpm));
     }
     if (!syncArmed) {
@@ -99,7 +99,7 @@ function handleMidiSync(event) {
       running = true;
       frameId = requestAnimationFrame(frame);
     }
-    updateSyncStatus(`Following MIDI clock - ${midiClock.bpm?.toFixed(1) || '...'} BPM`);
+    updateSyncStatus(`Following MIDI clock - ${midiClock.bpm ? Math.round(midiClock.bpm) : '...'} BPM`);
     if (pulse.number % 6 !== 0) return;
     const step = pulse.number / 6;
     const time = audio.currentTime + Math.max(0, (event.timeStamp - performance.now()) / 1000);
